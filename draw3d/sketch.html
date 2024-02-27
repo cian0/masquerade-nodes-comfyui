@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>p5.js Sketch</title>
+    <script src="p5.min.js"></script>
+    <style>
+        body { margin: 0; }
+    </style>
+</head>
+<body>
+    <script>
+        let font;
+        let pathData;
+
+        function setup() {
+            const params = new URLSearchParams(window.location.search);
+            const message = params.get('message') || "you spin me right round"; // Default message
+            const fontSize = parseInt(params.get('fontSize'), 10) || 70; // Default font size
+            const canvasWidth = parseInt(params.get('canvasWidth'), 10) || 512; // Canvas width
+            const canvasHeight = parseInt(params.get('canvasHeight'), 10) || 512; // Canvas height
+            const bg = params.get('bgColor') || '#ffffff'; // Background color
+            const thickness = parseInt(params.get('thickness'), 10) || 20; // Thickness of the 3D text
+            const _textSize = parseInt(params.get('textSize'), 120) || 200; // Thickness of the 3D text
+            const startX = parseFloat(params.get('startX')) || 0; // Start X
+            const startY = parseFloat(params.get('startY')) || 0; // Start Y
+            const rotateXDegrees = parseFloat(params.get('rotateX')) || 0; // Rotation around X axis
+            const rotateYDegrees = parseFloat(params.get('rotateY')) || 0; // Rotation around Y axis
+            const rotateZDegrees = parseFloat(params.get('rotateZ')) || 0; // Rotation around Z axis
+
+
+            createCanvas(canvasWidth,canvasHeight,WEBGL);
+            background(bg);
+            
+            textFont(font);
+            textAlign(CENTER,CENTER);
+            rotateX(radians(rotateXDegrees));
+            rotateY(radians(rotateYDegrees));
+            rotateZ(radians(rotateZDegrees));
+
+            fill('#000000');
+            push();
+            let startR = 150; // Example starting red value for deep purple
+            let startG = 150;  // Example starting green value
+            let startB = 150; // Example starting blue value
+
+
+            // New start positions
+
+            let initialZTranslation = -0.5 * (thickness - 1);
+
+            // Apply the initial translation before starting the loop
+            translate(startX, startY, initialZTranslation); // Apply the start X, Y, and initial Z translation here
+
+            textSize(fontSize);
+
+            for(let i=0; i<thickness; i++) {
+                // fill(map(i,0,100,0,255),80,215);
+                // fill(map(i, 0, thickness - 1, 0, 255),80,215);
+                if(i == thickness - 1) {
+                    fill(0, 0, 0); // Set the font color to white for the last layer
+                } else {
+                    // fill(map(i, 0, thickness, 0, 255), 80, 215); // Original gradient fill for other layers
+                    let r = map(i, 0, thickness-2, startR, 255); // startR is the red component of your start color
+                    let g = map(i, 0, thickness-2, startG, 255); // startG is the green component
+                    let b = map(i, 0, thickness-2, startB, 255); // startB is the blue component
+                    fill(r, g, b);
+                }
+                
+                translate(0,0,.5);
+                text(message,0,0);
+            }
+            pop();
+
+            noLoop(); // Since this is a static scene, no need to loop
+            window.sketchReady = true; // Indicate that the sketch is ready
+        }
+
+
+        function preload() {
+            // Ensure the font file is in your project directory or provide a path to it
+            const params = new URLSearchParams(window.location.search);
+            const fontFace = params.get('fontFace') || 'Staatliches-Regular.ttf'; // Default message
+            font = loadFont(fontFace); // Preload the font
+        }
+
+
+    </script>
+</body>
+</html>

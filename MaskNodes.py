@@ -1,5 +1,10 @@
 import os
 import torch
+from PIL import Image
+
+from PIL import ImageDraw, ImageFont
+
+import cv2
 import numpy as np
 import math
 from torchvision import transforms
@@ -8,6 +13,8 @@ import torchvision.transforms.functional as TF
 import torch.nn.functional as torchfn
 import subprocess
 import sys
+
+import dlib
 
 DELIMITER = '|'
 cached_clipseg_model = None
@@ -210,6 +217,444 @@ class ClipSegNode:
 
         return file_name
 
+# import torch
+
+# Tensor to PIL
+def tensor2pil(image):
+    return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
+
+# PIL to Tensor
+def pil2tensor(image):
+    return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+
+
+MAX_RESOLUTION=8192
+
+class ImagePadForOutpaintWithPaddingColor:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "left": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                "top": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                "right": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                "bottom": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                "feathering": ("INT", {"default": 40, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
+                # Add padding_color as a new parameter
+                "padding_color": ("STRING", {"default": "white"})  # Default to white for demonstration
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK")
+    FUNCTION = "expand_image"
+    CATEGORY = "image"
+
+    def expand_image(self, image, left, top, right, bottom, feathering, padding_color):
+        d1, d2, d3, d4 = image.size()
+
+        # Color map for named colors to RGB values
+        color_map = {
+            'white': (1.0, 1.0, 1.0),
+            'black': (0.0, 0.0, 0.0),
+            'red': (1.0, 0.0, 0.0),
+            'green': (0.0, 1.0, 0.0),
+            'blue': (0.0, 0.0, 1.0),
+            # Add more colors as needed
+        }
+
+        # Select the color from the color_map; default to white if not found
+        selected_color = color_map.get(padding_color, (1.0, 1.0, 1.0))
+
+        # Create a tensor for the selected color
+        color_tensor = torch.tensor(selected_color, dtype=torch.float32).view(1, 1, 1, 3)
+        color_tensor = color_tensor.expand(d1, d2 + top + bottom, d3 + left + right, d4)
+
+        # Initialize the new_image tensor with the selected padding color
+        new_image = color_tensor.clone()
+
+        # Insert the original image into the new_image tensor
+        new_image[:, top:top + d2, left:left + d3, :] = image
+
+        # Mask creation remains unchanged
+        mask = torch.ones(
+            (d2 + top + bottom, d3 + left + right),
+            dtype=torch.float32,
+        )
+        t = torch.zeros((d2, d3), dtype=torch.float32)
+        # Feathering logic (unchanged)
+        
+        if feathering > 0 and feathering * 2 < d2 and feathering * 2 < d3:
+
+            for i in range(d2):
+                for j in range(d3):
+                    dt = i if top != 0 else d2
+                    db = d2 - i if bottom != 0 else d2
+
+                    dl = j if left != 0 else d3
+                    dr = d3 - j if right != 0 else d3
+
+                    d = min(dt, db, dl, dr)
+
+                    if d >= feathering:
+                        continue
+
+                    v = (feathering - d) / feathering
+
+                    t[i, j] = v * v
+
+        mask[top:top + d2, left:left + d3] = t
+
+        return (new_image, mask)
+
+class Generate3DTextImageNode:
+    CATEGORY = "Custom"
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"default": "Hello World"}),
+                "thickness": ("INT", {"default": 50}),
+                "fontSize": ("INT", {"default": 100}),
+                "startX": ("INT", {"default": 120}),
+                "startY": ("INT", {"default": 120}),
+                "fontFace": ("STRING", {"default": "Copyduck.ttf"}),
+                "canvasWidth": ("INT", {"default": 512}),
+                "canvasHeight": ("INT", {"default": 512}),
+                "rotateX": ("FLOAT", {"default": -20.0}),
+                "rotateY": ("FLOAT", {"default": 30.0}),
+                "rotateZ": ("FLOAT", {"default": -10.0}),
+                "runningPort": ("STRING", {"default": ""}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "generate_3d_text_image"
+
+    def generate_3d_text_image(self, text, thickness, fontSize, startX, startY, fontFace, canvasWidth, canvasHeight, rotateX, rotateY, rotateZ, runningPort):
+        # Parameters to pass to the JavaScript script
+        params = [
+            text,
+            str(thickness),
+            str(fontSize),
+            str(startX),
+            str(startY),
+            fontFace,
+            str(canvasWidth),
+            str(canvasHeight),
+            str(rotateX),
+            str(rotateY),
+            str(rotateZ),
+            runningPort.strip()
+        ]
+        
+        # Resolve the path to the JavaScript script
+        draw_folder = "draw3d"
+        draw_file = "drawText.js"
+        script_directory = os.path.join(os.path.dirname(__file__), draw_folder)
+        script_path = os.path.join(script_directory, draw_file)
+        
+        # Change the current working directory to the script's directory
+        os.chdir(script_directory)
+        
+        # Execute the JavaScript script with Puppeteer
+        subprocess.run(["node", draw_file] + params, check=True)
+
+        # Optionally, change back to the original directory if needed
+        # os.chdir(original_directory)
+        
+        # Resolve the path to the generated image
+        image_file = "p5-sketch-dynamic.png"
+        image_path = os.path.join(script_directory, image_file)
+        
+        # Wait for the image file to be available
+        # Waiting logic goes here as previously described
+        
+        # Load the image using Pillow
+        image = Image.open(image_path)
+        # If you're using pil2tensor, ensure it's defined or imported
+        image = pil2tensor(image)
+        
+        return (image,)
+
+class HelloWorldOverlayText:
+    CATEGORY = "Custom"
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"default": "Hello World"}),
+                "image_width": ("INT", {"default": 800}),
+                "image_height": ("INT", {"default": 600}),
+                "font_size": ("INT", {"default": 24}),
+                "font_color": ("STRING", {"default": "black"}),
+                "background_color": ("STRING", {"default": "white"})
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "draw_overlay_text"
+
+    def draw_overlay_text(self, text, image_width, image_height, font_size, font_color, background_color):
+        # Create a new image with the given background color
+        image = Image.new("RGB", (image_width, image_height), background_color)
+        draw = ImageDraw.Draw(image)
+        
+        # Define the font and calculate text size
+        font = ImageFont.truetype("arial.ttf", font_size)
+        text_width, text_height = draw.textsize(text, font=font)
+        
+        # Calculate position and draw the text
+        text_x = (image_width - text_width) / 2
+        text_y = (image_height - text_height) / 2
+        draw.text((text_x, text_y), text, fill=font_color, font=font)
+        image = pil2tensor(image)
+
+        return (image,)
+
+
+class FixHeadRotation:
+    def __init__(self):
+        # Initialize the face detector and shape predictor
+        self.detector = dlib.get_frontal_face_detector()
+        models_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "models")
+
+        print(models_dir)
+        self.predictor = dlib.shape_predictor(f'{models_dir}/shape_predictor_68_face_landmarks.dat')
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "should_crop": ("BOOLEAN", {"default": False},),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "fix_head_rotation"
+    CATEGORY = "Image Analysis"
+
+    def fix_head_rotation(self, image, should_crop):
+        # Convert tensor to PIL Image for processing
+        image = tensor2pil(image)
+
+        # Convert PIL Image to OpenCV format
+        image_cv = np.array(image)
+        image_cv = cv2.cvtColor(image_cv, cv2.COLOR_RGB2BGR)
+
+        height, width = image_cv.shape[:2]
+        gray = cv2.cvtColor(image_cv, cv2.COLOR_BGR2GRAY)
+        faces = self.detector(gray)
+
+        angle = 0
+        for face in faces:
+            landmarks = self.predictor(gray, face)
+
+            # Calculate the angle
+            left_eye_point = (landmarks.part(36).x, landmarks.part(36).y)
+            right_eye_point = (landmarks.part(45).x, landmarks.part(45).y)
+            delta_x = right_eye_point[0] - left_eye_point[0]
+            delta_y = right_eye_point[1] - left_eye_point[1]
+            angle = np.arctan(delta_y / delta_x) * (180 / np.pi)
+
+        # Rotate and crop the image
+        rotated_image_cv = self.rotate_image(image_cv, angle, width, height, should_crop)
+
+        # Convert back to PIL Image
+        rotated_image = Image.fromarray(cv2.cvtColor(rotated_image_cv, cv2.COLOR_BGR2RGB))
+
+        # Convert back to tensor
+        rotated_image_tensor = pil2tensor(rotated_image)
+        return (rotated_image_tensor,)
+
+    def rotate_image(self, image, angle, width, height, should_crop):
+        center = (width // 2, height // 2)
+        rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated_image = cv2.warpAffine(image, rotation_matrix, (width, height), flags=cv2.INTER_LINEAR)
+
+        if should_crop:
+            crop_x, crop_y, crop_width, crop_height = self.calculate_crop_dimensions(width, height, angle)
+            cropped_image = rotated_image[crop_y:crop_y+crop_height, crop_x:crop_x+crop_width]
+
+            return cropped_image
+        else: 
+            return rotated_image
+
+    @staticmethod
+    def calculate_crop_dimensions(width, height, angle):
+        angle_rad = math.radians(angle)
+        cos_angle = abs(math.cos(angle_rad))
+        sin_angle = abs(math.sin(angle_rad))
+        new_width = int((height * sin_angle) + (width * cos_angle))
+        new_height = int((height * cos_angle) + (width * sin_angle))
+
+        border_horizontal = (new_width - width) / 2
+        border_vertical = (new_height - height) / 2
+
+        crop_x = int(border_horizontal)
+        crop_y = int(border_vertical)
+        crop_width = int(width - (2 * crop_x))
+        crop_height = int(height - (2 * crop_y))
+
+        return crop_x, crop_y, crop_width, crop_height
+
+
+class ResizeToTargetTransparency:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "current_transparency_percentage": ("FLOAT",{"default": 20.0}),
+                "target_transparency_percentage": ("FLOAT", {"default": 45.0, "min": 5, "max": 99., "step": 1}),
+                "padding_color": (['alpha','white','black','red','green','blue',],),
+
+                # "target_transparency_percentage": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 3., "step": 0.01}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE","INT","INT",)
+    FUNCTION = "resize_image_to_target_transparency"
+
+    CATEGORY = "Image Analysis"
+    
+    def resize_image_to_target_transparency(self, image, current_transparency_percentage, target_transparency_percentage, padding_color='alpha'):
+        image = tensor2pil(image)  # Assume this converts a tensor to a PIL Image
+        
+        # Define padding colors
+        color_map = {
+            'alpha': (0, 0, 0, 0),
+            'white': (255, 255, 255, 255),
+            'black': (0, 0, 0, 255),
+            'red': (255, 0, 0, 255),
+            'green': (0, 255, 0, 255),
+            'blue': (0, 0, 255, 255)
+        }
+        
+        # Get the RGBA value for the specified padding color
+        padding_rgba = color_map.get(padding_color, (0, 0, 0, 0))  # Default to transparent if unknown color
+        
+        # Load the image
+        original_image = image.convert('RGBA')
+        original_width, original_height = original_image.size
+        
+        # Convert to numpy array for efficient processing
+        image_data = np.array(original_image)
+        alpha_channel = image_data[:, :, 3]  # Extract the alpha channel
+
+        # Count non-transparent pixels efficiently
+        non_transparent_pixels = np.count_nonzero(alpha_channel != 0)
+        
+        # Calculate the desired total area based on the desired transparency percentage
+        desired_non_transparent_percentage = 100 - target_transparency_percentage
+        desired_total_area = non_transparent_pixels / (desired_non_transparent_percentage / 100)
+        total_pixels = original_width * original_height
+        scale_factor = desired_total_area / total_pixels
+        new_width = int(np.ceil(original_width * np.sqrt(scale_factor)))
+        new_height = int(np.ceil(original_height * np.sqrt(scale_factor)))
+        
+        # Calculate horizontal and vertical expansion
+        horizontal_expansion = new_width - original_width
+        vertical_expansion = new_height - original_height
+        
+        # Create a new image with specified padding color
+        new_image = Image.new('RGBA', (new_width, new_height), padding_rgba)
+        paste_x = horizontal_expansion // 2
+        paste_y = vertical_expansion // 2
+        new_image.paste(original_image, (paste_x, paste_y))
+        
+        # Convert the PIL Image back to a tensor
+        resized_image = pil2tensor(new_image)
+
+        return (resized_image,horizontal_expansion,vertical_expansion,)
+    
+    def add_padding_for_target_transparency(self, image, current_transparency_percentage, target_transparency_percentage):
+        image = tensor2pil(image)
+        # Current dimensions and area
+        width, height = image.size
+        current_area = width * height
+
+        # Area of transparency
+        area_of_transparency = (current_transparency_percentage / 100) * current_area
+
+        # New total area for target transparency
+        new_total_area = area_of_transparency / (target_transparency_percentage / 100)
+
+        # Padding area
+        padding_area = new_total_area - current_area
+        if padding_area < 0:
+            raise ValueError("Current transparency is already lower than the target transparency.")
+
+        # Padding dimensions
+        padding_width = (new_total_area - current_area) / height
+        padding_height = (new_total_area - current_area) / width
+
+        # Padding on each side
+        padding_left_right = int(padding_width / 2)
+        padding_top_bottom = int(padding_height / 2)
+
+        # Create new image with padding
+        new_image = Image.new("RGBA", (width + 2 * padding_left_right, height + 2 * padding_top_bottom), (0, 0, 0, 0))
+        new_image.paste(image, (padding_left_right, padding_top_bottom))
+
+        # return new_image
+        resized_image = pil2tensor(new_image)
+
+        return (resized_image,padding_width,padding_height,)
+
+class AlphaPercentageNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "mode": (["transparency", "white", "black"],),
+            },
+        }
+
+    RETURN_TYPES = ("FLOAT",)
+    FUNCTION = "calculate_alpha_percentage"
+
+    CATEGORY = "Image Analysis"
+
+    def calculate_alpha_percentage(self, image, mode='transparency'):
+        """
+        Calculate the percentage based on alpha, white color, or black color in a Pillow image.
+        :param image: A Pillow image in RGB or RGBA format.
+        :param mode: Mode of calculation ('transparency', 'white', 'black').
+        :return: Percentage based on the selected mode.
+        """
+        image = tensor2pil(image)
+        if not isinstance(image, Image.Image):
+            raise ValueError("The image must be a Pillow image object.")
+
+        if mode == 'transparency':
+            if image.mode != 'RGBA':
+                raise ValueError("Image must be in RGBA format for transparency mode.")
+            alpha_channel = np.array(image)[:, :, 3]
+            percentage = np.mean(alpha_channel / 255) * 100
+        elif mode in ['white', 'black']:
+            image_rgb = image.convert('RGB')
+            data = np.array(image_rgb)
+            target_color = [255, 255, 255] if mode == 'white' else [0, 0, 0]
+            mask = np.all(data == target_color, axis=-1)
+            percentage = np.mean(mask) * 100
+        else:
+            raise ValueError("Invalid mode. Choose from 'transparency', 'white', 'black'.")
+
+        # return percentage
+        return (percentage,)
+
 class MaskMorphologyNode:
     def __init__(self):
         pass
@@ -226,32 +671,32 @@ class MaskMorphologyNode:
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "morph"
-
     CATEGORY = "Masquerade Nodes"
 
     def morph(self, image, distance, op):
-        image = tensor2mask(image)
+        # Convert PyTorch tensor to NumPy array (assuming image is a single-channel mask)
+        image_np = image.numpy().squeeze()
+
+        # Define the kernel for morphological operations
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (distance * 2 + 1, distance * 2 + 1))
+
         if op == "dilate":
-            image = self.dilate(image, distance)
+            result = cv2.dilate(image_np, kernel, iterations=1)
         elif op == "erode":
-            image = self.erode(image, distance)
+            result = cv2.erode(image_np, kernel, iterations=1)
         elif op == "open":
-            image = self.erode(image, distance)
-            image = self.dilate(image, distance)
+            result = cv2.morphologyEx(image_np, cv2.MORPH_OPEN, kernel)
         elif op == "close":
-            image = self.dilate(image, distance)
-            image = self.erode(image, distance)
-        return (image,)
+            result = cv2.morphologyEx(image_np, cv2.MORPH_CLOSE, kernel)
+        else:
+            raise ValueError("Unsupported operation")
 
-    def erode(self, image, distance):
-        return 1. - self.dilate(1. - image, distance)
+        # Convert the result back to a PyTorch tensor
+        result_tensor = torch.from_numpy(result).unsqueeze(0)  # Add batch dimension
+        return (result_tensor,)
 
-    def dilate(self, image, distance):
-        kernel_size = 1 + distance * 2
-        # Add the channels dimension
-        image = image.unsqueeze(1)
-        out = torchfn.max_pool2d(image, kernel_size=kernel_size, stride=1, padding=kernel_size // 2).squeeze(1)
-        return out
+
+
 
 class MaskCombineOp:
     def __init__(self):
@@ -822,7 +1267,10 @@ class PasteByMask:
                 "image_base": ("IMAGE",),
                 "image_to_paste": ("IMAGE",),
                 "mask": ("IMAGE",),
-                "resize_behavior": (["resize", "keep_ratio_fill", "keep_ratio_fit", "source_size", "source_size_unmasked"],)
+                "resize_behavior": (["resize", "keep_ratio_fill", "keep_ratio_fit", "source_size", "source_size_unmasked"],),
+                # In the INPUT_TYPES classmethod, add a new optional parameter for the composite technique
+                "composite_technique": (["simple", "gaussian", "poisson", "poisson2", "none"],),
+
             },
             "optional": {
                 "mask_mapping_optional": ("MASK_MAPPING",),
@@ -834,7 +1282,7 @@ class PasteByMask:
 
     CATEGORY = "Masquerade Nodes"
 
-    def paste(self, image_base, image_to_paste, mask, resize_behavior, mask_mapping_optional = None):
+    def paste(self, image_base, image_to_paste, mask, resize_behavior, mask_mapping_optional = None, composite_technique = "none"):
         image_base = tensor2rgba(image_base)
         image_to_paste = tensor2rgba(image_to_paste)
         mask = tensor2mask(mask)
@@ -913,6 +1361,10 @@ class PasteByMask:
                 if SH != height or SW != width:
                     resized_image = torch.nn.functional.interpolate(resized_image.permute(0, 3, 1, 2), size=(height,width), mode='bicubic').permute(0, 2, 3, 1)
 
+                kernel_size = 49
+                
+                pasting_alpha = mask[i]
+
                 pasting = torch.ones([H, W, C])
                 ymid = float(mid_y[i].item())
                 ymin = int(math.floor(ymid - height / 2)) + 1
@@ -923,7 +1375,6 @@ class PasteByMask:
 
                 _, source_ymax, source_xmax, _ = resized_image.shape
                 source_ymin, source_xmin = 0, 0
-
                 if xmin < 0:
                     source_xmin = abs(xmin)
                     xmin = 0
@@ -937,18 +1388,201 @@ class PasteByMask:
                     source_ymax -= (ymax - H)
                     ymax = H
 
-                pasting[ymin:ymax, xmin:xmax, :] = resized_image[0, source_ymin:source_ymax, source_xmin:source_xmax, :]
-                pasting[:, :, 3] = 1.
+                # Convert tensor to numpy for Gaussian blur and back
+                if composite_technique == 'gaussian':
+                    mask_np = mask[i].cpu().numpy()
+                    mask_np = cv2.GaussianBlur(255 - mask_np, (kernel_size, kernel_size), kernel_size/3.)
+                    mask_np = 255 - mask_np
+                    pasting_alpha = torch.from_numpy(mask_np).to(mask.device)
 
-                pasting_alpha = torch.zeros([H, W])
-                pasting_alpha[ymin:ymax, xmin:xmax] = resized_image[0, source_ymin:source_ymax, source_xmin:source_xmax, 3]
+                        # Ensure alpha mask has the same number of channels as the image
+                    pasting_alpha = pasting_alpha.unsqueeze(2).repeat(1, 1, C)
 
-                if resize_behavior == "keep_ratio_fill" or resize_behavior == "source_size_unmasked":
-                    # If we explicitly want to fill the area, we are ok with extending outside
-                    paste_mask = pasting_alpha.unsqueeze(2).repeat(1, 1, 4)
+                    # Calculate the paste area
+                    ymin = max(int(mid_y[i].item() - height / 2), 0)
+                    ymax = min(ymin + height, H)
+                    xmin = max(int(mid_x[i].item() - width / 2), 0)
+                    xmax = min(xmin + width, W)
+
+                    # Ensure resized_image and pasting_alpha are correctly sized
+                    resized_image = resized_image[:, :ymax-ymin, :xmax-xmin, :]
+                    pasting_alpha = pasting_alpha[ymin:ymax, xmin:xmax, :]
+
+                    # Blend the images
+                    result[image_index, ymin:ymax, xmin:xmax, :] = resized_image * pasting_alpha + result[image_index, ymin:ymax, xmin:xmax, :] * (1. - pasting_alpha)
+                # ... existing code ...
+
+                elif composite_technique == 'poisson':
+                    def calculate_paste_region(center, paste_shape, H, W):
+                        paste_height, paste_width, _ = paste_shape
+                        center_x, center_y = center
+
+                        # Calculate the top left corner of the paste area
+                        xmin = max(center_x - paste_width // 2, 0)
+                        ymin = max(center_y - paste_height // 2, 0)
+
+                        # Adjust if the bottom or right edges exceed the base image dimensions
+                        xmax = min(xmin + paste_width, W)
+                        ymax = min(ymin + paste_height, H)
+
+                        # Adjust xmin and ymin if xmax or ymax adjustments caused the pasted image to shift
+                        xmin = max(xmax - paste_width, 0)
+                        ymin = max(ymax - paste_height, 0)
+
+                        print(f'Calculated paste region: xmin={xmin}, xmax={xmax}, ymin={ymin}, ymax={ymax}')
+                        return ymin, ymax, xmin, xmax
+                    
+                    # Original mask values are in the range [0, 1]
+                    mask_np = mask[i].cpu().numpy()
+
+
+                    print('Unique mask values before conversion:', np.unique(mask_np))
+                    image_base_np = image_base[i].cpu().numpy().astype(np.uint8)
+                    image_to_paste_np = image_to_paste[i].cpu().numpy().astype(np.uint8)
+                    # mask_np = mask[i].cpu().numpy().astype(np.uint8)
+                    # Convert non-zero values to 255 directly without intermediate uint8 conversion
+                    mask_np = np.where(mask_np > 0, 255, 0).astype(np.uint8)
+                    print('Unique mask values after conversion to uint8:', np.unique(mask_np))
+
+                    # Ensure mask is binary for Poisson blending
+                    # Convert non-zero mask values to 255 (white) for blending area
+                    mask_np[mask_np > 0] = 255
+                    print('Mask after conversion to binary for blending:', np.unique(mask_np))
+
+                    # Calculate the center for Poisson blending, ensuring it's within bounds
+                    center_x = int(min_x[i].item() + (max_x[i].item() - min_x[i].item()) / 2)
+                    center_y = int(min_y[i].item() + (max_y[i].item() - min_y[i].item()) / 2)
+                    center = (max(0, min(center_x, W - 1)), max(0, min(center_y, H - 1)))
+
+                    print(f'Calculated center for Poisson blending: center_x={center_x}, center_y={center_y}')
+
+                    # Apply Poisson blending using the corrected mask and center
+                    print(f"Base image dimensions: {image_base_np.shape}")
+                    print(f"Image to paste dimensions: {image_to_paste_np.shape}")
+                    print(f"Mask dimensions (after adding new axis): {mask_np[:, :, np.newaxis].shape}")
+                    print(f"Center: {center}")
+
+                    # Convert RGBA to RGB, if necessary
+                    image_base_np_rgb = image_base_np[..., :3]  # Drop the alpha channel
+                    image_to_paste_np_rgb = image_to_paste_np[..., :3]  # Drop the alpha channel
+
+                    # Use RGB images if conversion is done
+
+
+                    # Assuming center is (center_x, center_y) and base image dimensions are (H, W)
+                    if not (0 <= center_x < W and 0 <= center_y < H):
+                        print("Center is out of bounds!")
+                    else:
+                        print("Center is not out of bounds!")
+
+                    # Calculate the ROI bounds based on the source image dimensions and the center
+                    roi_xmin = max(center_x - image_to_paste_np.shape[1] // 2, 0)
+                    roi_ymin = max(center_y - image_to_paste_np.shape[0] // 2, 0)
+                    roi_xmax = min(roi_xmin + image_to_paste_np.shape[1], W)
+                    roi_ymax = min(roi_ymin + image_to_paste_np.shape[0], H)
+
+                    # Check if ROI exceeds base image dimensions
+                    if roi_xmax > W or roi_ymax > H:
+                        print("ROI exceeds base image dimensions!")
+                    else:
+                        print("ROI does not exceed base image dimensions!")
+
+                    # Adjust center or source image dimensions if necessary
+
+                    # comp_img_np = cv2.seamlessClone(image_to_paste_np_rgb, image_base_np_rgb, mask_np[:, :, np.newaxis], center, cv2.NORMAL_CLONE)
+                        
+                        # Create a simple test mask
+                    test_mask = np.zeros_like(image_base_np_rgb[:, :, 0])
+                    test_center = (100, 100)  # An example simple center
+                    cv2.circle(test_mask, test_center, 50, (255), -1)  # Create a circular mask for testing
+
+                    # Try seamlessClone with the simple mask
+
+                    if True:
+                        test_comp_img = cv2.seamlessClone(image_to_paste_np_rgb, image_base_np_rgb, test_mask[:, :, np.newaxis], test_center, cv2.NORMAL_CLONE)
+                        
+
+                        # comp_img_np = cv2.seamlessClone(image_to_paste_np, image_base_np, mask_np[:, :, np.newaxis], center, cv2.NORMAL_CLONE)
+
+                        # Check if the composite image is not just a black box
+                        if np.all(test_comp_img == 0):
+                            print('Error: Composite image is entirely black after Poisson blending.')
+                        else:
+                            print('Poisson blending applied successfully.')
+
+                        # Convert the result back to a tensor
+                        comp_img_tensor = torch.from_numpy(test_comp_img).to(image_base.device)
+
+                        # # Update the result image
+                        # ymin, ymax, xmin, xmax = calculate_paste_region(center, image_to_paste_np.shape, H, W)  # Implement this function based on your logic
+                        # result[i, ymin:ymax, xmin:xmax, :] = comp_img_tensor[ymin:ymax, xmin:xmax, :]
+
+                        # Assuming comp_img_tensor is the RGB result from cv2.seamlessClone
+                        # Add an alpha channel indicating full opacity (255)
+                        alpha_channel = 255 * np.ones((comp_img_tensor.shape[0], comp_img_tensor.shape[1], 1), dtype=comp_img_tensor.dtype)
+                        comp_img_tensor_with_alpha = np.concatenate((comp_img_tensor, alpha_channel), axis=-1)
+
+                        # Now, update the result tensor
+                        result[i, ymin:ymax, xmin:xmax, :] = torch.from_numpy(comp_img_tensor_with_alpha).to(image_base.device)
+
+
+                        print(f'Updated result image for index {i} in the batch.')
+                    else:
+                        
+                        comp_img_np = cv2.seamlessClone(image_to_paste_np, image_base_np, mask_np[:, :, np.newaxis], center, cv2.NORMAL_CLONE)
+
+                        # Check if the composite image is not just a black box
+                        if np.all(comp_img_np == 0):
+                            print('Error: Composite image is entirely black after Poisson blending.')
+                        else:
+                            print('Poisson blending applied successfully.')
+
+                        # Convert the result back to a tensor
+                        comp_img_tensor = torch.from_numpy(comp_img_np).to(image_base.device)
+
+                        # Update the result image
+                        ymin, ymax, xmin, xmax = calculate_paste_region(center, image_to_paste_np.shape, H, W)  # Implement this function based on your logic
+                        result[i, ymin:ymax, xmin:xmax, :] = comp_img_tensor[ymin:ymax, xmin:xmax, :]
+
+                        print(f'Updated result image for index {i} in the batch.')
+
+
+                elif composite_technique == 'poisson2':
+                    image_base_np = image_base[i].cpu().numpy().astype(np.uint8)
+                    image_to_paste_np = image_to_paste[i].cpu().numpy().astype(np.uint8)
+                    mask_np = mask[i].cpu().numpy().astype(np.uint8)
+
+                    center = ((xmin + xmax) // 2, (ymin + ymax) // 2)
+
+                    # Ensure the center is within the image dimensions
+                    center = (max(0, min(center[0], image_base_np.shape[1] - 1)), 
+                            max(0, min(center[1], image_base_np.shape[0] - 1)))
+
+                    # Apply Poisson blending
+                    comp_img_np = cv2.seamlessClone(image_to_paste_np, image_base_np, (mask_np*255)[:,:,np.newaxis], center, cv2.NORMAL_CLONE)
+
+                    # Convert the result back to a tensor
+                    comp_img_tensor = torch.from_numpy(comp_img_np).to(image_base.device)
+
+                    # Update the result tensor
+                    result[i, ymin:ymax, xmin:xmax, :] = comp_img_tensor[ymin:ymax, xmin:xmax, :]
+                
+           
                 else:
-                    paste_mask = torch.min(pasting_alpha, mask[i]).unsqueeze(2).repeat(1, 1, 4)
-                result[image_index] = pasting * paste_mask + result[image_index] * (1. - paste_mask)
+                    pasting[ymin:ymax, xmin:xmax, :] = resized_image[0, source_ymin:source_ymax, source_xmin:source_xmax, :]
+                    pasting[:, :, 3] = 1.
+
+                    pasting_alpha = torch.zeros([H, W])
+                    pasting_alpha[ymin:ymax, xmin:xmax] = resized_image[0, source_ymin:source_ymax, source_xmin:source_xmax, 3]
+
+                    if resize_behavior == "keep_ratio_fill" or resize_behavior == "source_size_unmasked":
+                        # If we explicitly want to fill the area, we are ok with extending outside
+                        paste_mask = pasting_alpha.unsqueeze(2).repeat(1, 1, 4)
+                    else:
+                        paste_mask = torch.min(pasting_alpha, mask[i]).unsqueeze(2).repeat(1, 1, 4)
+
+                    result[image_index] = pasting * paste_mask + result[image_index] * (1. - paste_mask)
+
         return (result,)
 
 class GetImageSize:
@@ -1293,6 +1927,9 @@ class MaqueradeIncrementerNode:
 NODE_CLASS_MAPPINGS = {
     "Mask By Text": ClipSegNode,
     "Mask Morphology": MaskMorphologyNode,
+    "Alpha Percentage": AlphaPercentageNode,    
+    "ResizeToTargetTransparency": ResizeToTargetTransparency,
+    "ImagePadForOutpaintWithPaddingColor": ImagePadForOutpaintWithPaddingColor,
     "Combine Masks": MaskCombineOp,
     "Unary Mask Op": UnaryMaskOp,
     "Unary Image Op": UnaryImageOp,
@@ -1313,6 +1950,9 @@ NODE_CLASS_MAPPINGS = {
     "Create QR Code": CreateQRCodeNode,
     "Convert Color Space": ConvertColorSpace,
     "MasqueradeIncrementer": MaqueradeIncrementerNode,
+    "FixHeadRotation": FixHeadRotation,
+    "HelloWorldOverlayText": HelloWorldOverlayText,
+    "Generate3DTextImageNode": Generate3DTextImageNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1338,4 +1978,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Create QR Code": "Create QR Code",
     "Convert Color Space": "Convert Color Space",
     "MasqueradeIncrementer": "Incrementer",
+    "ImagePadForOutpaintWithPaddingColor": "Image Pad For Outpaint With Padding Color",
+    "FixHeadRotation": "Fix Head Rotation",
+    "HelloWorldOverlayText": "Hello World Overlay Text",
+    "Generate3DTextImageNode": "Generate 3D Text Image Node",
 }
