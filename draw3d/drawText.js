@@ -1,7 +1,7 @@
 const puppeteer = require('puppeteer');
 const { spawn } = require('child_process');
 
-const [,, message, thickness, fontSize, startX, startY, fontFace, canvasWidth, canvasHeight, rotateX, rotateY, rotateZ, running_port] = process.argv;
+const [,, message, thickness, fontSize, startX, startY, fontFace, textColor, maxTextWidthPct, canvasWidth, canvasHeight, rotateX, rotateY, rotateZ, running_port] = process.argv;
 
 (async () => {
     // Start HTTP server
@@ -11,7 +11,7 @@ const [,, message, thickness, fontSize, startX, startY, fontFace, canvasWidth, c
         detached: true, // Detach the process so it can run independently
         stdio: 'ignore' // Ignore stdio
     });
-    server.unref(); // Don't wait for the spawned process to exit
+    // server.unref(); // Don't wait for the spawned process to exit
     console.log('HTTP server started on port 8170');
     console.timeEnd('Starting HTTP Server');
 
@@ -36,6 +36,8 @@ const [,, message, thickness, fontSize, startX, startY, fontFace, canvasWidth, c
         startX: parseFloat(startX),
         startY: parseFloat(startY),
         fontFace: encodeURIComponent(fontFace),
+        textColor: encodeURIComponent(textColor),
+        maxTextWidthPct: parseFloat(maxTextWidthPct),
         canvasWidth: parseInt(canvasWidth),
         canvasHeight: parseInt(canvasHeight),
         rotateX: parseFloat(rotateX),
@@ -48,7 +50,7 @@ const [,, message, thickness, fontSize, startX, startY, fontFace, canvasWidth, c
                             .map(key => `${key}=${params[key]}`)
                             .join('&');
 
-    let url = `http://localhost:8170/draw3d/sketch.html?${queryString}`;
+    let url = `http://localhost:8170/sketch.html?${queryString}`;
     await page.goto(url, {waitUntil: 'networkidle0'});
 
     console.timeEnd('Loading Page');
@@ -72,7 +74,13 @@ const [,, message, thickness, fontSize, startX, startY, fontFace, canvasWidth, c
         height: params.canvasHeight
     });
 
-    await page.screenshot({path: 'p5-sketch-dynamic.png'});
+    // await page.screenshot({path: 'p5-sketch-dynamic.png'});
+    await page.screenshot({
+        path: 'p5-sketch-dynamic.png',
+        omitBackground: true // This ensures the background is considered transparent
+    });
+    
+    
     console.timeEnd('Taking Screenshot');
 
     await browser.close();

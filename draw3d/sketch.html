@@ -20,6 +20,8 @@
             const canvasWidth = parseInt(params.get('canvasWidth'), 10) || 512; // Canvas width
             const canvasHeight = parseInt(params.get('canvasHeight'), 10) || 512; // Canvas height
             const bg = params.get('bgColor') || '#ffffff'; // Background color
+            const textColor = params.get('textColor') || '#000000'; // Background color
+            const maxTextWidthPct = parseFloat(params.get('maxTextWidthPct')) || 0; // Rotation around Z axis
             const thickness = parseInt(params.get('thickness'), 10) || 20; // Thickness of the 3D text
             const _textSize = parseInt(params.get('textSize'), 120) || 200; // Thickness of the 3D text
             const startX = parseFloat(params.get('startX')) || 0; // Start X
@@ -27,10 +29,12 @@
             const rotateXDegrees = parseFloat(params.get('rotateX')) || 0; // Rotation around X axis
             const rotateYDegrees = parseFloat(params.get('rotateY')) || 0; // Rotation around Y axis
             const rotateZDegrees = parseFloat(params.get('rotateZ')) || 0; // Rotation around Z axis
+            
 
 
             createCanvas(canvasWidth,canvasHeight,WEBGL);
-            background(bg);
+            clear(); // Use clear() instead of background(bg) for a transparent background.
+            // background(bg);
             
             textFont(font);
             textAlign(CENTER,CENTER);
@@ -38,7 +42,8 @@
             rotateY(radians(rotateYDegrees));
             rotateZ(radians(rotateZDegrees));
 
-            fill('#000000');
+            // fill('#000000');
+            fill(textColor);
             push();
             let startR = 150; // Example starting red value for deep purple
             let startG = 150;  // Example starting green value
@@ -52,13 +57,17 @@
             // Apply the initial translation before starting the loop
             translate(startX, startY, initialZTranslation); // Apply the start X, Y, and initial Z translation here
 
-            textSize(fontSize);
+            // textSize(fontSize);
+
+            let adjustedFontSize = adjustFontSizeToFit(message, fontSize, canvasWidth * maxTextWidthPct); // Use 80% of canvas width as max
+            textSize(adjustedFontSize);
 
             for(let i=0; i<thickness; i++) {
                 // fill(map(i,0,100,0,255),80,215);
                 // fill(map(i, 0, thickness - 1, 0, 255),80,215);
                 if(i == thickness - 1) {
-                    fill(0, 0, 0); // Set the font color to white for the last layer
+                    // fill(0, 0, 0); // Set the font color to white for the last layer
+                    fill(textColor);
                 } else {
                     // fill(map(i, 0, thickness, 0, 255), 80, 215); // Original gradient fill for other layers
                     let r = map(i, 0, thickness-2, startR, 255); // startR is the red component of your start color
@@ -74,6 +83,20 @@
 
             noLoop(); // Since this is a static scene, no need to loop
             window.sketchReady = true; // Indicate that the sketch is ready
+        }
+
+        function adjustFontSizeToFit(text, initialFontSize, maxWidth) {
+            let currentFontSize = initialFontSize;
+            textSize(currentFontSize); // Apply initial font size to start measurement
+            let currentTextWidth = textWidth(text); // Correctly call textWidth() function to get the width of the text
+            
+            while (currentTextWidth > maxWidth && currentFontSize > 0) {
+                currentFontSize--; // Decrease the font size
+                textSize(currentFontSize); // Apply the new font size to adjust measurement
+                currentTextWidth = textWidth(text); // Measure the text width again with the updated font size
+            }
+            
+            return currentFontSize;
         }
 
 

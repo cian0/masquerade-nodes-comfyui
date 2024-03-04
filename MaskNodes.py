@@ -325,6 +325,8 @@ class Generate3DTextImageNode:
                 "startX": ("INT", {"default": 120}),
                 "startY": ("INT", {"default": 120}),
                 "fontFace": ("STRING", {"default": "Copyduck.ttf"}),
+                "fontColor": ("STRING", {"default": "#000000"}),
+                "maxTextWidthPct": ("FLOAT", {"default": 0.4}),
                 "canvasWidth": ("INT", {"default": 512}),
                 "canvasHeight": ("INT", {"default": 512}),
                 "rotateX": ("FLOAT", {"default": -20.0}),
@@ -337,7 +339,7 @@ class Generate3DTextImageNode:
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "generate_3d_text_image"
 
-    def generate_3d_text_image(self, text, thickness, fontSize, startX, startY, fontFace, canvasWidth, canvasHeight, rotateX, rotateY, rotateZ, runningPort):
+    def generate_3d_text_image(self, text, thickness, fontSize, startX, startY, fontFace, fontColor, maxTextWidthPct, canvasWidth, canvasHeight, rotateX, rotateY, rotateZ, runningPort):
         # Parameters to pass to the JavaScript script
         params = [
             text,
@@ -346,6 +348,8 @@ class Generate3DTextImageNode:
             str(startX),
             str(startY),
             fontFace,
+            fontColor,
+            str(maxTextWidthPct),
             str(canvasWidth),
             str(canvasHeight),
             str(rotateX),
@@ -382,6 +386,226 @@ class Generate3DTextImageNode:
         image = pil2tensor(image)
         
         return (image,)
+
+import dlib
+import cv2
+import numpy as np
+from imutils import face_utils
+# from comfyui.node_base import NodeBase
+
+class FaceOverlayNode():
+    CATEGORY = "Image Processing"
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("output_image",)
+    FUNCTION = "process_images"
+
+
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "source_image": ("IMAGE",),
+                "target_image": ("IMAGE",),
+                "dilation": ("INT", {"default": 10}),
+            }
+        }
+
+    def __init__(self):
+        # Load dlib models, ensure paths to models are accessible
+        self.detector = dlib.get_frontal_face_detector()
+        models_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "models")
+        self.predictor = dlib.shape_predictor(f'{models_dir}/shape_predictor_68_face_landmarks.dat')
+    
+
+    def overlay_with_white_dilation(self, png_face, target_image, M, dilation_radius=5, scale_factor=1):
+
+         # Adjust the transformation matrix for scaling
+        # M_scaled = M.copy()
+        # M_scaled[:, 2] *= scale_factor  # Scale translation components
+
+        # # Apply the scaled transformation
+        # transformed_png = cv2.warpAffine(png_face[:, :, :3], M_scaled, (target_image.shape[1], target_image.shape[0]))
+
+
+        # Transform the PNG face
+        transformed_png = cv2.warpAffine(png_face[:, :, :3], M, (target_image.shape[1], target_image.shape[0]))
+
+        # Extract and transform the alpha channel
+        alpha_channel = png_face[:, :, 3] / 255.0
+        transformed_alpha_mask = cv2.warpAffine(alpha_channel, M, (target_image.shape[1], target_image.shape[0]))
+
+        # Dilate the alpha mask
+        kernel = np.ones((dilation_radius, dilation_radius), np.uint8)
+        dilated_alpha_mask = cv2.dilate(transformed_alpha_mask, kernel, iterations=1)
+        
+        # Convert dilated mask to 3 channels
+        dilated_alpha_mask_3ch = cv2.merge([dilated_alpha_mask] * 3)
+        
+        # Set the dilated area to white on the target image
+        white_background = np.ones_like(target_image, dtype=np.uint8) * 255  # Create a white image of the same size
+        target_with_white_bg = np.where(dilated_alpha_mask_3ch > 0, white_background, target_image).astype(np.uint8)
+        
+        # Apply the original (non-dilated) alpha mask to blend the PNG face onto the now modified target image
+        original_alpha_mask_3ch = cv2.merge([transformed_alpha_mask] * 3)
+
+        foreground = transformed_png.astype(float)
+
+        background = target_with_white_bg.astype(float)
+
+        blended = foreground * original_alpha_mask_3ch + background * (1 - original_alpha_mask_3ch)
+        return blended.astype(np.uint8)
+
+    def calculate_aspect_ratio_preserving_transform(self, source_points, target_points, overlay_image_size):
+        # Calculate target dimensions and aspect ratio
+        target_width = np.linalg.norm(target_points[0] - target_points[1])
+        target_height = np.linalg.norm(target_points[0] - target_points[3])
+        target_aspect_ratio = target_width / target_height
+
+        # Source image aspect ratio
+        source_aspect_ratio = overlay_image_size[1] / overlay_image_size[0]
+
+        # Determine scale based on aspect ratio comparison
+        if source_aspect_ratio > target_aspect_ratio:
+            # Source is wider relative to target; scale by height
+            scale = target_height / overlay_image_size[0]
+        else:
+            # Source is narrower; scale by width
+            scale = target_width / overlay_image_size[1]
+
+        # Calculate scaled source points for affine transform
+        src_pts_scaled = np.float32([
+            [0, 0],  # Top-left
+            [overlay_image_size[1] * scale, 0],  # Top-right
+            [0, overlay_image_size[0] * scale]  # Bottom-left
+        ])
+
+        # Calculate affine transform matrix using scaled source points
+        M = cv2.getAffineTransform(src_pts_scaled, target_points[:3].astype(np.float32))
+
+        return M
+    
+    def pil_to_cv2(self, pil_image):
+        # Convert a PIL Image to a CV2 Image
+        np_image = np.array(pil_image)  # Convert PIL image to a numpy array
+        if pil_image.mode == 'RGBA':
+            # For an RGBA image, convert it to BGRA in OpenCV
+            cv2_image = cv2.cvtColor(np_image, cv2.COLOR_RGBA2BGRA)
+        else:
+            # For an RGB image, convert it to BGR in OpenCV
+            cv2_image = cv2.cvtColor(np_image, cv2.COLOR_RGB2BGR)
+        return cv2_image
+
+    def convert_tensor_to_pil_with_alpha(self, tensor_image):
+        # Assuming tensor_image is a PyTorch tensor in [B, H, W, C] format
+        if tensor_image.shape[3] == 4:  # Check if there's an alpha channel
+            image_np = (tensor_image.squeeze().cpu().numpy() * 255).astype(np.uint8)
+            image_pil = Image.fromarray(image_np, 'RGBA')  # Create an RGBA PIL image
+        else:
+            image_np = (tensor_image.squeeze().cpu().numpy()[:, :, :3] * 255).astype(np.uint8)
+            image_pil = Image.fromarray(image_np, 'RGB')  # Create an RGB PIL image if no alpha channel
+        return image_pil
+    
+    def calculate_affine_transform(self, source_points, target_points):
+        """Calculate the affine transformation matrix."""
+        indices = [36, 45, 48, 54]  # Eyes and mouth corners
+        src_pts = source_points[indices].astype(np.float32)
+        dst_pts = target_points[indices].astype(np.float32)
+        M = cv2.getAffineTransform(src_pts[:3], dst_pts[:3])
+        return M
+    
+    # def calculate_affine_transform(self, source_points, target_points):
+    #     # Eye landmarks for left and right eye center
+    #     left_eye_indices = np.array([36, 37, 38, 39, 40, 41])
+    #     right_eye_indices = np.array([42, 43, 44, 45, 46, 47])
+        
+    #     # Calculate the center of the eyes for source and target
+    #     source_left_eye_center = np.mean(source_points[left_eye_indices], axis=0)
+    #     source_right_eye_center = np.mean(source_points[right_eye_indices], axis=0)
+    #     target_left_eye_center = np.mean(target_points[left_eye_indices], axis=0)
+    #     target_right_eye_center = np.mean(target_points[right_eye_indices], axis=0)
+        
+    #     # Calculate the angle for rotation based on the eye line
+    #     source_angle = np.arctan2(source_right_eye_center[1] - source_left_eye_center[1], source_right_eye_center[0] - source_left_eye_center[0])
+    #     target_angle = np.arctan2(target_right_eye_center[1] - target_left_eye_center[1], target_right_eye_center[0] - target_left_eye_center[0])
+    #     angle = np.degrees(target_angle - source_angle)
+        
+    #     # Calculate scale based on the distance between eyes
+    #     source_eye_distance = np.linalg.norm(source_right_eye_center - source_left_eye_center)
+    #     target_eye_distance = np.linalg.norm(target_right_eye_center - target_left_eye_center)
+    #     scale = target_eye_distance / source_eye_distance
+        
+    #     # Calculate the center for transformation
+    #     source_center = (source_left_eye_center + source_right_eye_center) / 2
+    #     target_center = (target_left_eye_center + target_right_eye_center) / 2
+        
+    #     # Calculate the rotation matrix
+    #     M = cv2.getRotationMatrix2D(tuple(source_center), angle, scale)
+    #     # Adjust the translation part of the transformation matrix
+    #     M[:, 2] += (target_center - source_center) * scale
+        
+    #     return M
+
+    def calculate_scale_factor(self, src_pts, dst_pts):
+        # Calculate distances in both sets for scaling
+        dist_src = np.linalg.norm(src_pts[0] - src_pts[1])
+        dist_dst = np.linalg.norm(dst_pts[0] - dst_pts[1])
+
+        # Calculate scale factor
+        scale_factor = dist_dst / dist_src
+
+        return scale_factor
+
+   
+    def process_images(self, source_image, target_image, dilation):
+        source_image_pil = self.convert_tensor_to_pil_with_alpha(source_image)
+        target_image_pil = self.convert_tensor_to_pil_with_alpha(target_image)
+        source_image_cv = self.pil_to_cv2(source_image_pil)
+        target_image_cv = self.pil_to_cv2(target_image_pil)
+
+
+        source_rects = self.detector(source_image_cv[:, :, :3], 1)
+        # png_face_rects = detector(png_face[:, :, :3], 1)
+        target_rects = self.detector(target_image_cv, 1)
+        # target_rects = self.detector(target_image_cv[:, :, :3], 1)
+
+        if len(source_rects) <= 0:
+            raise ValueError("Face not detected in source.")
+        if len(target_rects) <= 0:
+            raise ValueError("Face not detected in target.")
+
+        if len(source_rects) > 0 and len(target_rects) > 0:
+
+            source_shape = self.predictor(source_image_cv[:, :, :3], source_rects[0])
+            # target_shape = self.predictor(target_image_cv[:, :, :3], target_rects[0])
+            target_shape = self.predictor(target_image_cv, target_rects[0])
+
+            source_points = face_utils.shape_to_np(source_shape)
+            target_points = face_utils.shape_to_np(target_shape)
+            
+            # Calculate the affine transformation matrix
+            M = self.calculate_affine_transform(source_points, target_points)
+            # source_image_size = source_image_cv.shape[:2]
+            # M = self.calculate_aspect_ratio_preserving_transform(source_points, target_points, source_image_size)
+
+            # M, scale_factor = self.calculate_affine_transform(source_points, target_points)
+
+            # Use scale_factor in the overlay method
+            # output_image = self.overlay_with_white_dilation(source_image_cv, target_image_cv, M, dilation, scale_factor)
+            # Overlay the face with white dilation
+            output_image = self.overlay_with_white_dilation(source_image_cv, target_image_cv, M, dilation)
+
+            # Convert back to RGB format if needed
+            output_image_rgb = cv2.cvtColor(output_image, cv2.COLOR_BGR2RGB)
+            output_image_rgb = Image.fromarray(output_image_rgb)
+            
+
+            output_image_tensor = pil2tensor(output_image_rgb)
+            
+            return (output_image_tensor,)
+        else:
+            raise ValueError("Face not detected in one or both images.")
+
 
 class HelloWorldOverlayText:
     CATEGORY = "Custom"
@@ -1982,6 +2206,7 @@ NODE_CLASS_MAPPINGS = {
     "MasqueradeIncrementer": MaqueradeIncrementerNode,
     "FixHeadRotation": FixHeadRotation,
     "HelloWorldOverlayText": HelloWorldOverlayText,
+    "FaceOverlayNode": FaceOverlayNode,
     "Generate3DTextImageNode": Generate3DTextImageNode,
 }
 
@@ -2012,4 +2237,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FixHeadRotation": "Fix Head Rotation",
     "HelloWorldOverlayText": "Hello World Overlay Text",
     "Generate3DTextImageNode": "Generate 3D Text Image Node",
+    "FaceOverlayNode": "Face Overlay Node",
 }
