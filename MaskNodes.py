@@ -368,7 +368,7 @@ class Generate3DTextImageNode:
         os.chdir(script_directory)
         
         # Execute the JavaScript script with Puppeteer
-        subprocess.run(["node", draw_file] + params, check=True)
+        subprocess.run(["/root/.nvm/versions/node/v20.12.0/bin/node", draw_file] + params, check=True)
 
         # Optionally, change back to the original directory if needed
         # os.chdir(original_directory)

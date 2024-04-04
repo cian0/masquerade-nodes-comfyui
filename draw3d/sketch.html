@@ -16,12 +16,12 @@
         function setup() {
             const params = new URLSearchParams(window.location.search);
             const message = params.get('message') || "you spin me right round"; // Default message
-            const fontSize = parseInt(params.get('fontSize'), 10) || 70; // Default font size
+            const fontSize = parseInt(params.get('fontSize'), 10) || 100; // Default font size
             const canvasWidth = parseInt(params.get('canvasWidth'), 10) || 512; // Canvas width
             const canvasHeight = parseInt(params.get('canvasHeight'), 10) || 512; // Canvas height
             const bg = params.get('bgColor') || '#ffffff'; // Background color
             const textColor = params.get('textColor') || '#000000'; // Background color
-            const maxTextWidthPct = parseFloat(params.get('maxTextWidthPct')) || 0; // Rotation around Z axis
+            const maxTextWidthPct = parseFloat(params.get('maxTextWidthPct')) || 0.8; // Rotation around Z axis
             const thickness = parseInt(params.get('thickness'), 10) || 20; // Thickness of the 3D text
             const _textSize = parseInt(params.get('textSize'), 120) || 200; // Thickness of the 3D text
             const startX = parseFloat(params.get('startX')) || 0; // Start X
@@ -33,8 +33,8 @@
 
 
             createCanvas(canvasWidth,canvasHeight,WEBGL);
-            clear(); // Use clear() instead of background(bg) for a transparent background.
-            // background(bg);
+            // clear(); // Use clear() instead of background(bg) for a transparent background.
+            background(bg);
             
             textFont(font);
             textAlign(CENTER,CENTER);
@@ -83,6 +83,7 @@
 
             noLoop(); // Since this is a static scene, no need to loop
             window.sketchReady = true; // Indicate that the sketch is ready
+            console.log("Done!")
         }
 
         function adjustFontSizeToFit(text, initialFontSize, maxWidth) {

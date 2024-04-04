@@ -22,6 +22,7 @@ const [,, message, thickness, fontSize, startX, startY, fontFace, textColor, max
 
     console.time('Launching Browser');
     const browser = await puppeteer.launch({
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
         headless: true // Ensure it runs in headless mode
     });
     console.timeEnd('Launching Browser');
@@ -49,7 +50,6 @@ const [,, message, thickness, fontSize, startX, startY, fontFace, textColor, max
     let queryString = Object.keys(params)
                             .map(key => `${key}=${params[key]}`)
                             .join('&');
-
     let url = `http://localhost:8170/sketch.html?${queryString}`;
     await page.goto(url, {waitUntil: 'networkidle0'});
 
@@ -79,8 +79,8 @@ const [,, message, thickness, fontSize, startX, startY, fontFace, textColor, max
         path: 'p5-sketch-dynamic.png',
         omitBackground: true // This ensures the background is considered transparent
     });
-    
-    
+
+
     console.timeEnd('Taking Screenshot');
 
     await browser.close();
